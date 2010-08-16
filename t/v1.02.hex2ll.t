@@ -1,7 +1,7 @@
 use strict;
 use Test::Base;
 plan tests => 4 * blocks;
-use Geo::Hex;
+use Geo::Hex1;
 
 run {
     my $block = shift;

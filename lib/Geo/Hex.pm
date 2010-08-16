@@ -6,203 +6,195 @@ use Carp;
 
 use POSIX       qw/floor ceil/;
 use Math::Round qw/round/;
+use Math::Trig qw( pi tan );
+use Geo::Proj4;
 
-use version; our $VERSION = qv('0.0.1');
+use version; our $VERSION = qv('0.0.2');
 use vars qw(@ISA @EXPORT);
 use Exporter;
 @ISA    = qw(Exporter);
-@EXPORT = qw(latlng2geohex geohex2latlng geohex2polygon geohex2distance distance2geohexes);
+@EXPORT = qw(latlng2geohex geohex2latlng getZoneByLocation getZoneByCode);
 
 # Constants
 
-my $h_key       = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX';
+my $h_key       = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 my @h_key       = split( //, $h_key );
-my $h_customize = 0;
-my $h_grid      = 1000;
-my $h_size      = 0.5;
-my $min_x_lon   = 122930; #与那国島
-my $min_x_lat   = 24448;
-my $min_y_lon   = 141470; #南硫黄島
-my $min_y_lat   = 24228;
+my $h_base      = 20037508.3;
+my $h_deg       = pi() * ( 30.0 / 180.0 );
+my $h_k         = tan($h_deg);
+my $h_range     = 21;
 
-# Some internal functions
-
-sub __geohex2level {
-    my $code = shift;
-    
-    my @code     = split( //, $code );
-    my $c_length = @code or croak 'GeoHex code must be set';
-    my $level;
-
-    if ( $c_length > 4 ) {
-        $level = index( $h_key, shift @code );
-        croak 'Code format is something wrong' if ( $level == -1 );
-        $level = 60 if ( $level == 0 );
-    } else {
-        $level = 7;
-    }
-    return ( $level, $c_length, @code );
-}
-
-sub __geohex2hyhx {
-    my $code = shift;
-
-    my ( $level, $c_length, @code ) = eval { __geohex2level( $code ) };
-    croak $@ if ( $@ );
-
-    my $unit_x = 6.0 * $level * $h_size;
-    my $unit_y = 2.8 * $level * $h_size;
-    my $h_k    = ( round( ( 1.4 / 3 ) * $h_grid ) ) / $h_grid;
-    my $base_x = floor( ( $min_x_lon + $min_x_lat / $h_k ) / $unit_x );
-    my $base_y = floor( ( $min_y_lat - $h_k * $min_y_lon ) / $unit_y );
-
-    my ( $h_x, $h_y );
-    if ( $c_length > 5 ) {
-        $h_x = index( $h_key, $code[0] ) * 3600 + index( $h_key, $code[2] ) * 60 + index( $h_key, $code[4] );
-        $h_y = index( $h_key, $code[1] ) * 3600 + index( $h_key, $code[3] ) * 60 + index( $h_key, $code[5] );
-    } else {
-        $h_x = index( $h_key, $code[0] ) * 60   + index( $h_key, $code[2] );
-        $h_y = index( $h_key, $code[1] ) * 60   + index( $h_key, $code[3] );
-    }
-    
-    return ( $h_y, $h_x, $level, $unit_x, $unit_y, $h_k, $base_x, $base_y );
-}
-
-sub __hyhx2geohex {
-    my ( $h_y, $h_x, $level ) = @_;
-
-    my $h_x_100 = floor( $h_x / 3600);
-    my $h_x_10  = floor(($h_x % 3600) / 60);
-    my $h_x_1   = floor(($h_x % 3600) % 60);
-    my $h_y_100 = floor( $h_y / 3600);
-    my $h_y_10  = floor(($h_y % 3600) / 60);
-    my $h_y_1   = floor(($h_y % 3600) % 60);
-
-    my $code;
-    if ( $level < 7 ) {
-        $code = $h_key[ $level % 60 ] . $h_key[ $h_x_100 ] . $h_key[ $h_y_100 ] . $h_key[ $h_x_10 ] . $h_key[ $h_y_10 ] . $h_key[ $h_x_1 ] . $h_key[ $h_y_1 ];
-    } elsif ( $level == 7 ) {
-        $code = $h_key[ $h_x_10 ] . $h_key[ $h_y_10 ] . $h_key[ $h_x_1 ] . $h_key[ $h_y_1 ];
-    } else {
-        $code = $h_key[ $level % 60 ] . $h_key[ $h_x_10 ] . $h_key[ $h_y_10 ] . $h_key[ $h_x_1 ] . $h_key[ $h_y_1 ];
-    }
-    return $code;
-}
-
-# Export function for GeoHex
+my $mproj = Geo::Proj4->new("+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=\@null +no_defs");
+my $wproj = Geo::Proj4->new("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs");
 
 sub latlng2geohex {
-    my $lat   = shift;
-    my $lon   = shift;
-    my $level = shift;
+    return getZoneByLocation(@_)->{code};
+}
 
-    $level = defined( $level ) ? $level : 7;
-    croak 'Level must be between 1 and 60' if ( $level !~ /^\d+$/ || $level < 1 || $level > 60 );
+sub geohex2latlng{
+    my $_code    = shift;
+    my $level    = index($h_key, substr($_code,0,1));
+    my $zone     = getZoneByCode($_code);
+    return ( ( map { $zone->{$_} } qw/lat lon/ ), $level);
+}
 
-    my $lon_grid = $lon * $h_grid;
-    my $lat_grid = $lat * $h_grid;
-    my $unit_x   = 6.0  * $level * $h_size;
-    my $unit_y   = 2.8  * $level * $h_size;
-    my $h_k      = ( round( (1.4 / 3) * $h_grid) ) / $h_grid;
-    my $base_x   = floor( ($min_x_lon + $min_x_lat / $h_k      ) / $unit_x);
-    my $base_y   = floor( ($min_y_lat - $h_k       * $min_y_lon) / $unit_y);
-    my $h_pos_x  = ( $lon_grid + $lat_grid / $h_k     ) / $unit_x - $base_x;
-    my $h_pos_y  = ( $lat_grid - $h_k      * $lon_grid) / $unit_y - $base_y;
+sub getZoneByLocation {
+    my ( $_lat, $_lon, $_level ) = @_;
+    $_level = 16 if ( !defined($_level) );
+    my $hex_pos;
+    my $h_size = __setHexSize($_level);
+    my $zone   = {};
+
+    my $z_xy   = __loc2xy($_lon, $_lat);
+
+    my $lon_grid = $z_xy->[0];
+    my $lat_grid = $z_xy->[1];
+    my $unit_x   = 6.0 * $h_size;
+    my $unit_y   = 6.0 * $h_size * $h_k;
+    my $h_pos_x  = ( $lon_grid + $lat_grid / $h_k ) / $unit_x;
+    my $h_pos_y  = ( $lat_grid - $h_k * $lon_grid ) / $unit_y;
     my $h_x_0    = floor($h_pos_x);
     my $h_y_0    = floor($h_pos_y);
-    my $h_x_q    = floor(($h_pos_x - $h_x_0) * 100) / 100;
-    my $h_y_q    = floor(($h_pos_y - $h_y_0) * 100) / 100;
+    my $h_x_q    = floor(($h_pos_x - $h_x_0) * 100.0) / 100.0;
+    my $h_y_q    = floor(($h_pos_y - $h_y_0) * 100.0) / 100.0;
     my $h_x      = round($h_pos_x);
     my $h_y      = round($h_pos_y);
-    if ( $h_y_q > -$h_x_q + 1 ) {
-        if( ($h_y_q < 2 * $h_x_q ) && ( $h_y_q > 0.5 * $h_x_q ) ){
-            $h_x = $h_x_0 + 1;
-            $h_y = $h_y_0 + 1;
-       }
-    } elsif ( $h_y_q < -$h_x_q + 1 ) {
-        if( ($h_y_q > (2 * $h_x_q ) - 1 ) && ( $h_y_q < ( 0.5 * $h_x_q ) + 0.5 ) ) {
+
+    my $h_max    = round( $h_base / $unit_x + $h_base / $unit_y );
+
+    if ( $h_y_q > - $h_x_q + 1.0 ) {
+        if ( ( $h_y_q < 2.0 * $h_x_q ) && ( $h_y_q > 0.5 * $h_x_q ) ) {
+            $h_x = $h_x_0 + 1.0;
+            $h_y = $h_y_0 + 1.0;
+        }
+    } elsif ( $h_y_q < - $h_x_q + 1.0 ){
+        if ( ( $h_y_q > ( 2.0 * $h_x_q ) - 1.0 ) && ( $h_y_q < ( 0.5 * $h_x_q) + 0.5 ) ) {
             $h_x = $h_x_0;
             $h_y = $h_y_0;
         }
     }
 
-    return __hyhx2geohex( $h_y, $h_x, $level );
+    my $h_lat = ( $h_k * $h_x * $unit_x + $h_y * $unit_y ) / 2.0;
+    my $h_lon = ( $h_lat - $h_y * $unit_y ) / $h_k;
+
+    my $z_loc   = __xy2loc($h_lon, $h_lat);
+    my $z_loc_x = $z_loc->[0];
+    my $z_loc_y = $z_loc->[1];
+    if ( $h_base - $h_lon < $h_size ) {
+       $z_loc_x = 180.0;
+       my $h_xy = $h_x;
+       $h_x     = $h_y;
+       $h_y     = $h_xy;
+    }
+
+    my $h_x_p =0;
+    my $h_y_p =0;
+    if ( $h_x < 0.0 ) {
+        $h_x_p = 1.0;
+    }
+    if ( $h_y < 0.0 ) {
+        $h_y_p = 1.0;
+    }
+    my $h_x_abs = abs( $h_x ) * 2.0 + $h_x_p;
+    my $h_y_abs = abs( $h_y ) * 2.0 + $h_y_p;
+
+    my $h_x_10000 = floor( ( $h_x_abs % 77600000 ) / 1296000.0 );
+    my $h_x_1000  = floor( ( $h_x_abs % 1296000  ) / 216000.0 );
+    my $h_x_100   = floor( ( $h_x_abs % 216000   ) / 3600.0 );
+    my $h_x_10    = floor( ( $h_x_abs % 3600     ) / 60.0 );
+    my $h_x_1     = floor( ( $h_x_abs % 3600     ) % 60 );
+
+    my $h_y_10000 = floor( ( $h_y_abs % 77600000) / 1296000.0 );
+    my $h_y_1000  = floor( ( $h_y_abs % 1296000 ) / 216000.0 );
+    my $h_y_100   = floor( ( $h_y_abs % 216000  ) / 3600.0 );
+    my $h_y_10    = floor( ( $h_y_abs % 3600    ) / 60.0 );
+    my $h_y_1     = floor( ( $h_y_abs % 3600    ) % 60 );
+
+    my $h_code    = $h_key[$_level % 60];
+
+    if ( $h_max >= 1296000.0 / 2.0 ) {
+        $h_code = $h_code . $h_key[$h_x_10000] . $h_key[$h_y_10000];
+    }
+    if ( $h_max >= 216000.0  / 2.0 ) {
+        $h_code = $h_code . $h_key[$h_x_1000]  . $h_key[$h_y_1000];
+    }
+    if ( $h_max >= 3600.0    / 2.0 ) {
+        $h_code = $h_code . $h_key[$h_x_100]   . $h_key[$h_y_100];
+    }
+    if ( $h_max >= 60.0      / 2.0 ) {
+        $h_code = $h_code . $h_key[$h_x_10]    . $h_key[$h_y_10];
+    }
+    $h_code = $h_code . $h_key[$h_x_1] . $h_key[$h_y_1];
+
+    $zone->{lat}  = $z_loc_y;
+    $zone->{lon}  = $z_loc_x;
+    $zone->{x}    = $h_x;
+    $zone->{y}    = $h_y;
+    $zone->{code} = $h_code;
+    return $zone;
 }
 
-sub geohex2latlng{
-    my $code = shift;
+sub getZoneByCode {
+    my $_code    = shift;
+    my @_code    = split(//,$_code);
+    my $c_length = @_code;
+    my $zone     = {};
+    my $level    = index($h_key, $_code[0]);
+    my $scl      = $level;
+    my $h_base   = 20037508.3;
+    my $h_size   = $h_base / 2.0 ** $level / 3.0;
+    my $unit_x   = 6.0 * $h_size;
+    my $unit_y   = 6.0 * $h_size * $h_k;
+    my $h_max    = round($h_base / $unit_x + $h_base / $unit_y);
+    my $h_x=0;
+    my $h_y=0;
 
-    my ( $lat, $lon );
-    my ( $h_y, $h_x, $level, $unit_x, $unit_y, $h_k, $base_x, $base_y ) = eval { __geohex2hyhx( $code ) };
-    croak $@ if ( $@ );
-    
-    my $h_lat = ( $h_k   * ( $h_x + $base_x ) * $unit_x + ( $h_y + $base_y ) * $unit_y ) / 2;
-    my $h_lon = ( $h_lat - ( $h_y + $base_y ) * $unit_y ) / $h_k;
-    $lat      = $h_lat / $h_grid;
-    $lon      = $h_lon / $h_grid;
-
-    return ( $lat, $lon, $level );
-}
-
-
-sub geohex2polygon{
-    my $code = shift;
-    my ( $lat, $lon, $level ) = geohex2latlng( $code );
-
-    my $d = $level * $h_size / $h_grid;
-    
-    return [
-        [ $lat           , $lon - 2.0 * $d ],
-        [ $lat + 1.4 * $d, $lon - 1.0 * $d ],
-        [ $lat + 1.4 * $d, $lon + 1.0 * $d ],
-        [ $lat           , $lon + 2.0 * $d ],
-        [ $lat - 1.4 * $d, $lon + 1.0 * $d ],
-        [ $lat - 1.4 * $d, $lon - 1.0 * $d ],
-        [ $lat           , $lon - 2.0 * $d ],
-    ];
-}
-
-sub geohex2distance {
-    my ( $code1, $code2 ) = @_;
-    
-    my ( $h_y1, $h_x1, $level1 ) = eval { __geohex2hyhx( $code1 ) };
-    croak $@ if ( $@ );
-    my ( $h_y2, $h_x2, $level2 ) = eval { __geohex2hyhx( $code2 ) };
-    croak $@ if ( $@ );
-    croak 'Level of codes are must same value' unless ( $level1 == $level2 );
-    
-    my $dh_y = $h_y1 - $h_y2;
-    my $dh_x = $h_x1 - $h_x2;
-    my $ah_y = abs( $dh_y );
-    my $ah_x = abs( $dh_x );
-        
-    if ( $dh_y * $dh_x > 0 ) {
-        return $ah_x > $ah_y ? $ah_x : $ah_y;
+    if( $h_max >= 1296000.0 / 2.0 ) {
+        $h_x = index($h_key, $_code[1]) * 1296000.0 + index($h_key, $_code[3]) * 216000.0 + 
+               index($h_key, $_code[5]) * 3600.0    + index($h_key, $_code[7]) * 60.0     + index($h_key, $_code[9]);
+        $h_y = index($h_key, $_code[2]) * 1296000.0 + index($h_key, $_code[4]) * 216000.0 + 
+               index($h_key, $_code[6]) * 3600.0    + index($h_key, $_code[8]) * 60.0     + index($h_key, $_code[10]);
+    } elsif ( $h_max >= 216000.0 / 2.0 ) {
+        $h_x = index($h_key, $_code[1]) * 216000.0  + index($h_key, $_code[3]) * 3600.0   +
+               index($h_key, $_code[5]) * 60.0      + index($h_key, $_code[7]);
+        $h_y = index($h_key, $_code[2]) * 216000.0  + index($h_key, $_code[4]) * 3600.0   +
+               index($h_key, $_code[6]) * 60.0      + index($h_key, $_code[8]);
+    } elsif ( $h_max >= 3600.0 / 2.0 ) {
+        $h_x = index($h_key, $_code[1]) * 3600.0    + index($h_key, $_code[3]) * 60.0     + index($h_key, $_code[5]);
+        $h_y = index($h_key, $_code[2]) * 3600.0    + index($h_key, $_code[4]) * 60.0     + index($h_key, $_code[6]);
+    } elsif ( $h_max >= 60.0 / 2.0 ) {
+        $h_x = index($h_key, $_code[1]) * 60.0      + index($h_key, $_code[3]);
+        $h_y = index($h_key, $_code[2]) * 60.0      + index($h_key, $_code[4]);
     } else {
-        return $ah_x + $ah_y;
+        $h_x = index($h_key, $_code[1]) * 60.0;
+        $h_y = index($h_key, $_code[2]) * 60.0;
     }
+
+    $h_x        = ( $h_x % 2 ) ? -($h_x - 1.0) / 2.0 : $h_x / 2.0;
+    $h_y        = ( $h_y % 2 ) ? -($h_y - 1.0) / 2.0 : $h_y / 2.0;
+    my $h_lat_y = ( $h_k * $h_x * $unit_x + $h_y * $unit_y ) / 2.0;
+    my $h_lon_x = ( $h_lat_y - $h_y * $unit_y ) / $h_k;
+
+    my $h_ll    = __xy2loc($h_lon_x, $h_lat_y);
+    my $h_lon   = $h_ll->[0];
+    my $h_lat   = $h_ll->[1];
+    $zone->{code} = $_code;
+    $zone->{lat}  = $h_lat;
+    $zone->{lon}  = $h_lon;
+    $zone->{x}    = $h_x;
+    $zone->{y}    = $h_y;
+    return $zone;
 }
 
-sub distance2geohexes {
-    my ( $code, $dist ) = @_;
-    
-    my ( $h_y, $h_x, $level ) = eval { __geohex2hyhx( $code ) };
-    croak $@ if ( $@ );
-    
-    my @results;
-    foreach my $d_y ( -1 * $dist .. $dist ) {
-        my $dh_y  = $h_y + $d_y;
-        my $dmn_x = $d_y > 0 ? -1 * $dist + $d_y : -1 * $dist;
-        my $dmx_x = $d_y < 0 ? $dist + $d_y      : $dist;
-        
-        foreach my $d_x ( $dmn_x .. $dmx_x ) {
-            next if ( $d_y == 0 && $d_x == 0 );
-        
-            push @results, __hyhx2geohex( $h_y + $d_y, $h_x + $d_x, $level );
-        }
-    }
-    
-    return \@results;
+sub __setHexSize {
+  return $h_base / 2.0 ** $_[0] / 3.0;
+}
+
+sub __loc2xy {
+    return $wproj->transform($mproj,\@_);
+}
+sub __xy2loc {
+    return $mproj->transform($wproj,\@_);
 }
 
 1; # Magic true value required at end of module
@@ -210,7 +202,7 @@ __END__
 
 =head1 NAME
 
-Geo::Hex - Convert between latitude/longitude and GeoHex code
+Geo::Hex - Convert between latitude/longitude and GeoHex code (version 2:world wide)
 
 
 =head1 SYNOPSIS
@@ -225,68 +217,40 @@ Geo::Hex - Convert between latitude/longitude and GeoHex code
     
     my ( $center_lat, $center_lng, $level ) = geohex2latlng( $code );
     
-    # From hex code to hex polygon
+    # From latitude/longitude to zone object*
+    my $zone = getZoneByLocation( $lat, $lng, $level );
     
-    my $poly = geohex2polygon( $code );
+    # From hex code to zone object*
+    my $zone = getZoneByCode( $code );
 
-    my ( $wlat,  $wlng  ) = @{$poly->[0]}; # West point
-    my ( $nwlat, $nwlng ) = @{$poly->[1]}; # North west point
-    my ( $nelat, $nelng ) = @{$poly->[2]}; # North east point
-    my ( $elat,  $elng  ) = @{$poly->[3]}; # East point
-    my ( $selat, $selng ) = @{$poly->[4]}; # South east point
-    my ( $swlat, $swlng ) = @{$poly->[5]}; # South west point
-    my ( $wlat,  $wlng  ) = @{$poly->[6]}; # West point again ( Same with 0 )
-
-    # Get hex distance between two hex codes
-    
-    my $dist = geohex2distance('wknR','wkmO'); # 3
-    
-    # Get all hex codes list include in given hex distance
-    
-    my $list = distance2geohexes('8sijg',2); 
-    foreach my $code (@{$list}) { print $code . "\n" }
-    # 8sijh
-    # 8siig
-    # 8siif
-    # 8sijf
-    # 8sikg
-    # 8sikh
-    # 8sili
-    # 8siki
-    # 8siji
-    # 8siih
-    # 8sihg
-    # 8sihf
-    # 8sihe
-    # 8siie
-    # 8sije
-    # 8sikf
-    # 8silg
-    # 8silh
+    # * zone object: hash value
+    # $zone->{code} : GeoHex code
+    # $zone->{lat}  : Latirude of given GeoHex's center point
+    # $zone->{lon}  : Longitude of given GeoHex's center point
+    # $zone->{hx}   : Mercator X coordinate of given GeoHex's center point 
+    # $zone->{hy}   : Mercator Y coordinate of given GeoHex's center point 
 
 =head1 EXPORT
 
 =over
 
-=item C<< latlng2geohex( $lat, $lng ) >>
+=item C<< latlng2geohex( $lat, $lng, $level ) >>
 
 Convert latitude/longitude to GeoHex code.
+$level is optional, and default value is 16.
 
 =item C<< geohex2latlng( $hex ) >>
 
-Convert GepHex code to center latitude/longitude, and level value.
+Convert GeoHex code to center latitude/longitude, and level value.
 
-=item C<< geohex2polygon( $hex ) >>
+=item C<< getZoneByLocation( $lat, $lng, $level ) >>
 
-Convert GeoHex code to polygon points.
+Convert latitude/longitude to GeoHex zone object.
+$level is optional, and default value is 16.
 
-=item C<< geohex2distance( $hex1, $hex2 ) >>
+=item C<< getZoneByCode( $hex ) >>
 
-Get hex distance between two GeoHex codes.
-
-=item C<< distance2geohexes( $hex, $distance ) >>
-
-Get GeoHex codes list within given hex distance.
+Convert GeoHex code to GeoHex zone object.
 
 =back
 
@@ -296,7 +260,8 @@ Get GeoHex codes list within given hex distance.
 Exporter
 POSIX
 Math::Round
-
+Math::Trig
+Geo::Proj4
 
 =head1 AUTHOR
 
@@ -305,7 +270,7 @@ OHTSUKA Ko-hei  C<< <nene@kokogiko.net> >>
 
 =head1 LICENCE AND COPYRIGHT
 
-Copyright (c) 2009, OHTSUKA Ko-hei C<< <nene@kokogiko.net> >>. All rights reserved.
+Copyright (c) 2009-2010, OHTSUKA Ko-hei C<< <nene@kokogiko.net> >>. All rights reserved.
 
 This module is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself. See L<perlartistic>.

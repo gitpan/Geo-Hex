@@ -13,6 +13,8 @@ my $builder = Module::Build->new(
         'Exporter'       => 0,
         'POSIX'          => 0,
         'Math::Round'    => 0,
+        'Math::Trig'     => 0,
+        'Geo::Proj4'     => 0,
     },
     add_to_cleanup      => [ 'Geo-Hex-*' ],
 );
